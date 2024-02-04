@@ -66,6 +66,25 @@ IRsend irsend(SEND_PIN);
 SunSet sun;
 int timezone;
 
+const int BUFFER_SIZE = 100;
+int lightSensorReadings[BUFFER_SIZE];
+int currentIndex = 0;
+int lightSensorReading = 0;
+
+void updateAverage(int newReading)
+{
+    lightSensorReading -= lightSensorReadings[currentIndex];
+    lightSensorReadings[currentIndex] = newReading;
+
+    int sum = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++)
+    {
+        sum += lightSensorReadings[i];
+    }
+    lightSensorReading = sum / BUFFER_SIZE;
+    currentIndex = (currentIndex + 1) % BUFFER_SIZE;
+}
+
 void setup()
 {
     // Set up IRSend
@@ -134,6 +153,14 @@ void setup()
     // Set up SunSet
     sun.setPosition(LATITUDE, LONGITUDE, timezone);
 
+    // Initialize the circular buffer with initial readings
+    for (int i = 0; i < BUFFER_SIZE; i++)
+    {
+        lightSensorReadings[i] = analogRead(LIGHT_SENSOR_PIN);
+        lightSensorReading += lightSensorReadings[i];
+    }
+    lightSensorReading /= BUFFER_SIZE;
+
     // Print IP Address
     IPAddress ip = WiFi.localIP();
     Serial.println();
@@ -147,6 +174,7 @@ void setup()
 bool roomLightsDetected = true;
 bool isPoweredOn = false;
 int brightness = 3; // 0: auto (unused), 1: low, 2: medium, 3: high
+int requestedBrightness = 3;
 
 void loop()
 {
@@ -163,63 +191,81 @@ void loop()
     // sunrise/sunset are in minutes past midnight, so we need to get ours too
     double minsPastMidnight = hour() * 60 + minute() + GMTOFFSET_SEC / 60;
 
-    // Logging
-    static unsigned long next;
-    if (millis() - next > 1000)
+    // Handle brightness
+    static unsigned long next1;
+    if (millis() - next1 > 250)
     {
-        next = millis();
-        log("Sunrise: " + String(sunrise));
-        log("Sunset: " + String(sunset));
-        log("Mins past midnight: " + String(minsPastMidnight));
+        next1 = millis();
+        if (brightness != requestedBrightness)
+        {
+            brightness--;
+            log("Brightness changed to: " + String(brightness) + " -> " + String(requestedBrightness));
+            if (brightness < 0)
+            {
+                brightness = 3;
+            }
+            sendKeycode(keyCodes.bright);
+        }
     }
 
-    int lightSensorReading = analogRead(LIGHT_SENSOR_PIN);
+    // Get the latest light sensor reading
+    int newReading = analogRead(LIGHT_SENSOR_PIN);
+
+    // Update the average reading
+    updateAverage(newReading);
+
+    // Set the adjusted light sensor reading
+    int adjustedLightSensorReading = lightSensorReading / 50;
+    adjustedLightSensorReading *= 50;
+
+    
+    // Logging
+    static unsigned long next2;
+    if (millis() - next2 > 1000)
+    {
+        next2 = millis();
+        log("Rise: " + String(sunrise) + " Set: " + String(sunset) + " MinsPM: " + String(minsPastMidnight));
+        log("Light sensor: " + String(lightSensorReading) + " adj " + String(adjustedLightSensorReading));
+    }
+
+
     // Different logic for day and night
     if (minsPastMidnight > sunrise && minsPastMidnight < sunset)
     {
-        if (!isPoweredOn) {
+        if (!isPoweredOn)
+        {
             sendKeycode(keyCodes.power);
             isPoweredOn = true;
             log("Day / Powered on");
         }
-        
-        // Day
-        if (lightSensorReading < DIM_THRESHOLD_DAY)
-        {
-            if (brightness != 1)
-            {
 
-                setBrightness(1);
-                log("Day / Brightness low");
-            }
-        }
-        else if (lightSensorReading > BRIGHT_THRESHOLD_DAY)
+        // Day
+        if (adjustedLightSensorReading < DIM_THRESHOLD_DAY && brightness != 1)
         {
-            if (brightness != 3)
-            {
-                setBrightness(3);
-                log("Day / Brightness high");
-            }
+            setBrightness(1);
+            log("Day / Brightness low");
         }
-        else
+        else if (adjustedLightSensorReading > BRIGHT_THRESHOLD_DAY && brightness != 3)
         {
-            if (brightness != 2)
-            {
-                setBrightness(2);
-                log("Day / Brightness medium");
-            }
+            setBrightness(3);
+            log("Day / Brightness high");
+        }
+        else if (adjustedLightSensorReading >= DIM_THRESHOLD_DAY && adjustedLightSensorReading <= BRIGHT_THRESHOLD_DAY && brightness != 2)
+        {
+            setBrightness(2);
+            log("Day / Brightness medium");
         }
     }
     else
     {
         // Night
-        if (lightSensorReading > OFF_THRESHOLD_NIGHT && !isPoweredOn)
+        if (adjustedLightSensorReading > OFF_THRESHOLD_NIGHT && !isPoweredOn)
         {
             sendKeycode(keyCodes.power);
             isPoweredOn = true;
             log("Night / Powered on");
         }
-        else if (lightSensorReading < OFF_THRESHOLD_NIGHT && isPoweredOn)
+        else if (adjustedLightSensorReading < OFF_THRESHOLD_NIGHT && isPoweredOn)
         {
             sendKeycode(keyCodes.power);
             isPoweredOn = false;
@@ -254,18 +300,10 @@ void loop()
     // }
 }
 
-void setBrightness(int requestedBrightness)
+void setBrightness(int requestedBrightnessParam)
 {
-    while (brightness != requestedBrightness)
-    {
-        brightness--;
-        if (brightness < 0)
-        {
-            brightness = 3;
-        }
-        sendKeycode(keyCodes.bright);
-        delay(250);
-    }
+    log("Brightness requested: " + String(requestedBrightnessParam));
+    requestedBrightness = requestedBrightnessParam;
 }
 
 void sendKeycode(uint64_t code)
