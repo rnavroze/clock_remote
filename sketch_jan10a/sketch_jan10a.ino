@@ -24,6 +24,7 @@
 #define OFF_THRESHOLD_NIGHT 50
 #define DIM_THRESHOLD_DAY 800
 #define BRIGHT_THRESHOLD_DAY 1200
+#define HYSTERESIS 50
 
 // Timezone
 #define GMTOFFSET_SEC -18000 // UTC-5
@@ -188,6 +189,7 @@ bool isChangingBrightness = false;
 #define BRIGHT_LOW 3
 #define BRIGHT_AUTO 4
 #define MAX_BRIGHTNESS 4
+#define LOGGING_DELAY 5000
 
 int brightness = 1; // 0: off, 1: high, 2: medium, 3: low, 4: auto (unused)
 int requestedBrightness = 1;
@@ -207,24 +209,31 @@ void loop()
   // sunrise/sunset are in minutes past midnight, so we need to get ours too
   double minsPastMidnight = hour() * 60 + minute() + GMTOFFSET_SEC / 60;
 
-  // Handle brightness
+  // Check at this point of time if our brightness is not requested brightness
+  isChangingBrightness = brightness != requestedBrightness;
+
+  // Handle brightness (we can't just hit delay() because we need to handle OTA and Telnet)
   static unsigned long next1;
   if (millis() - next1 > 250)
   {
     next1 = millis();
-    isChangingBrightness = false;
-    if (brightness != requestedBrightness)
+    if (isChangingBrightness)
     {
-      isChangingBrightness = true;
+      log("Brightness is changing from " + String(brightness) + " / Requested: " + String(requestedBrightness));
       brightness++;
       if (brightness > MAX_BRIGHTNESS)
       {
         brightness = 0;
       }
-      log("Brightness changed to: " + String(brightness) + " / Requested: " + String(requestedBrightness));
+      log("Brightness changed to " + String(brightness));
       sendKeycode(keyCodes.bright);
-      return;
     }
+  }
+
+  // If brightness is currently being changed, we don't need to do anything else
+  if (isChangingBrightness)
+  {
+    return;
   }
 
   // Get the latest light sensor reading
@@ -238,13 +247,13 @@ void loop()
   adjustedLightSensorReading *= 50;
 
 
-  // Logging
+  // Logging data every 5 seconds
   static unsigned long next2;
-  if (millis() - next2 > 1000)
+  if (millis() - next2 > LOGGING_DELAY)
   {
     next2 = millis();
-//    log("Rise: " + String(sunrise) + " Set: " + String(sunset) + " MinsPM: " + String(minsPastMidnight));
-    log("Light sensor: " + String(lightSensorReading) + " adj " + String(adjustedLightSensorReading) + " Brightness: " + brightness);
+    // log("Rise: " + String(sunrise) + " Set: " + String(sunset) + " MinsPM: " + String(minsPastMidnight));
+    log("Light sensor: " + String(lightSensorReading) + " / adj " + String(adjustedLightSensorReading) + " / Brightness: " + brightness);
   }
 
 
@@ -252,63 +261,37 @@ void loop()
   if (minsPastMidnight > sunrise && minsPastMidnight < sunset)
   {
     // Day
-    if (adjustedLightSensorReading < DIM_THRESHOLD_DAY && brightness != BRIGHT_LOW)
-    {
+    if (adjustedSensorReading < DIM_THRESHOLD_DAY-HYSTERESIS && brightness != BRIGHT_LOW) {
       setBrightness(BRIGHT_LOW);
-      log("Day / Brightness low");
+      log("Day / Brightness low / Brightness fell below " + String(DIM_THRESHOLD_DAY-HYSTERESIS));
     }
-    else if (adjustedLightSensorReading > BRIGHT_THRESHOLD_DAY && brightness != BRIGHT_HIGH)
-    {
-      setBrightness(BRIGHT_HIGH);
-      log("Day / Brightness high");
-    }
-    else if (adjustedLightSensorReading >= DIM_THRESHOLD_DAY && adjustedLightSensorReading <= BRIGHT_THRESHOLD_DAY && brightness != BRIGHT_MID)
-    {
+    else if (adjustedLightSensorReading > DIM_THRESHOLD_DAY+HYSTERESIS && brightness != BRIGHT_MID) {
       setBrightness(BRIGHT_MID);
-      log("Day / Brightness medium");
+      log("Day / Brightness medium / Brightness rose above " + String(DIM_THRESHOLD_DAY+HYSTERESIS));
+    }
+    else if (adjustedLightSensorReading > BRIGHT_THRESHOLD_DAY-HYSTERESIS && brightness != BRIGHT_HIGH) {
+      setBrightness(BRIGHT_HIGH);
+      log("Day / Brightness high / Brightness rose above " + String(BRIGHT_THRESHOLD_DAY-HYSTERESIS));
+    } 
+    else if (adjustedLightSensorReading < BRIGHT_THRESHOLD_DAY+HYSTERESIS && brightness != BRIGHT_MID) {
+      setBrightness(BRIGHT_MID);
+      log("Day / Brightness medium / Brightness fell below " + String(BRIGHT_THRESHOLD_DAY+HYSTERESIS));
     }
   }
   else
   {
     // Night
-    if (adjustedLightSensorReading > OFF_THRESHOLD_NIGHT && brightness != BRIGHT_LOW)
+    if (adjustedLightSensorReading > OFF_THRESHOLD_NIGHT+HYSTERESIS && brightness != BRIGHT_LOW)
     {
       setBrightness(BRIGHT_LOW);
-      log("Night / Powered on");
+      log("Night / Powered on / Brightness rose above " + String(OFF_THRESHOLD_NIGHT+HYSTERESIS));
     }
-    else if (adjustedLightSensorReading < OFF_THRESHOLD_NIGHT && brightness != BRIGHT_OFF)
+    else if (adjustedLightSensorReading < OFF_THRESHOLD_NIGHT-HYSTERESIS && brightness != BRIGHT_OFF)
     {
       setBrightness(BRIGHT_OFF);
-      log("Night / Powered off");
+      log("Night / Powered off / Brightness fell below " + String(OFF_THRESHOLD_NIGHT-HYSTERESIS));
     }
   }
-
-
-  // int lightSensorReading = analogRead(LIGHT_SENSOR_PIN);
-  // if (lightSensorReading > OFF_THRESHOLD_NIGHT && roomLightsDetected)
-  // {
-  //     sendKeycode(keyCodes.power);
-  //     roomLightsDetected = false;
-  //     log("Room lights off");
-  // }
-  // else if (lightSensorReading < OFF_THRESHOLD_NIGHT && !roomLightsDetected)
-  // {
-  //     sendKeycode(keyCodes.power);
-  //     roomLightsDetected = true;
-  //     log("Room lights on");
-  // }
-
-  // static unsigned long next;
-  // if (millis() - next > 1000)
-  // {
-  //     struct tm timeinfo;
-  //     getLocalTime(&timeinfo);
-  //     log("Is DST? " + String(timeinfo.tm_isdst));
-  //     next = millis();
-  //     char reading[20];
-  //     sprintf(reading, "Light: %d", analogRead(LIGHT_SENSOR_PIN));
-  //     log(reading);
-  // }
 }
 
 void setBrightness(int requestedBrightnessParam)
@@ -350,12 +333,8 @@ void handleTelnetRead()
       TelnetStream.stop();
       break;
     case 'b':
-      if (++brightness > MAX_BRIGHTNESS) {
-        brightness = 0;
-      }
-      requestedBrightness = brightness;
-
-      TelnetStream.println("Brightness force set to " + brightness);
+      sendKeycode(keyCodes.bright);
+      TelnetStream.println("Brightness key sent");
       break;
     case 's':
       int tempRequestedBrightness = requestedBrightness;
